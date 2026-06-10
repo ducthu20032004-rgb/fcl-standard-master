@@ -652,7 +652,7 @@ def main():
             # ── ③ Snapshot AFTER aggregate + tính drift ──
             aggr_state = state_dict_to_cpu(global_model.state_dict())
 
-            _drift_csv_path = cp_round_dir / "drift_results.csv"
+            _drift_csv_path = cp_round_dir / f"drift_results_{args.dirichlet_alpha}.csv"
             _drift_fieldnames = [
                 "global_round", "task_pos", "round_in_task",
                 "client_id", "task_id", "block",
