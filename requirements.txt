@@ -1,0 +1,11 @@
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+tqdm>=4.66
+torch>=2.1
+torchvision>=0.16
+nflows>=0.14
+
+requests>=2.31
+py7zr>=0.21
+torch-geometric>=2.5
