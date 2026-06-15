@@ -47,7 +47,7 @@ DATASET_DEFAULTS = {
         "use_cifar100_tensor_cache": False,
     },
     "cifar10": {
-        "batch_size": 128,
+        "batch_size": 64,
         "eval_batch_size": 256,
         "task_label_order": "sequential",
         "dirichlet_allocation": "multinomial",
@@ -116,7 +116,7 @@ def parse_args():
         default="cycle",
         choices=["cycle", "random"],
     )
-    parser.add_argument("--use-pretrained-backbone", type=str2bool, default=True)
+    parser.add_argument("--use-pretrained-backbone", type=str2bool, default=False)
 
     # PACS
     parser.add_argument("--pacs-image-size", type=int, default=224)
@@ -183,7 +183,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--lr", type=float, default=0.05)
+    parser.add_argument("--lr", type=float, default=0.1)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--weight-decay", type=float, default=5e-4)
     parser.add_argument("--loss-mode", type=str, default="full", choices=["full", "partial"])
@@ -437,7 +437,7 @@ def save_checkpoint(state_dict, checkpoint_dir: Path, tag: str, client_id: int, 
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = checkpoint_dir / f"client_{client_id}_task_{task_id}_round_{round_in_task}_{tag}.pt"
         #torch.save(state_dict, path)
-        logger.info("[CHECKPOINT][%s] client=%s | task=%s | round=%s", tag, client_id, task_id, round_in_task)
+        #logger.info("[CHECKPOINT][%s] client=%s | task=%s | round=%s", tag, client_id, task_id, round_in_task)
     except Exception as e:
         logger.error("[CHECKPOINT ERROR][%s] client=%s: %s", tag, client_id, str(e))
 def main():
@@ -628,7 +628,7 @@ def main():
 
                 
                 # Save client weights at the end of each task for offline drift analysis.
-                if round_in_task == 24:
+                if round_in_task == args.rounds_per_task - 1:
                     try:
                         checkpoint_dir = Path(run_dirs["run_dir"]) / f"checkpoints_client_{args.backbone}_hete_{args.dirichlet_alpha}"
                         

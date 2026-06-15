@@ -616,7 +616,7 @@ def measure_all_representation_drift(args, dataset_bundle, partition):
         list_acc_matrix = []
         for (t, tprime) in task_pairs:
 
-            for round_idx in [24]:
+            for round_idx in [4]:
                 logger.info(f'  ┌── Task pair ({t}, {tprime}), round {round_idx}')
 
                 ckpt_t  = get_model_path(args.saving_dir, client_id, t,      round_idx)
