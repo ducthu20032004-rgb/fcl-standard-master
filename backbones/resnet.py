@@ -11,6 +11,8 @@ import torch.nn as nn
 from torchvision.models import resnet18 as tv_resnet18
 from torchvision.models import resnet34 as tv_resnet34
 from torchvision.models import resnet50 as tv_resnet50
+from torchvision.models import resnet101 as tv_resnet101
+from torchvision.models import vit_b_16, vit_b_32, vit_l_16, VisionTransformer
 from .registry import register_backbone
 
 
@@ -172,3 +174,134 @@ def make_resnet50(num_classes: int, args=None) -> nn.Module:
     model.fc = nn.Linear(model.fc.in_features, num_classes)
     return model
 
+@register_backbone("resnet101")
+def make_resnet101(num_classes: int, args=None) -> nn.Module:
+    model = tv_resnet101(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    return model
+
+class CIFARViT(nn.Module):
+    """
+    ViT cho CIFAR (32x32), wrapper tương thích 100% với get_resnet18_blocks()
+    và compute_feature_resnet18() mà không cần sửa code đó.
+
+    get_resnet18_blocks() chạy:
+        for block_name, ops in blocks.items():
+            features = ops(features)
+            if block_name == target: break
+        output = flatten(features, 1)
+
+    Nên mỗi block phải:
+        - Nhận tensor từ block trước
+        - Trả tensor cho block sau
+        - Block cuối (block4) trả (B, hidden_dim) để flatten = chính nó
+    """
+
+    # ── Internal block modules ────────────────────────────────────────────
+
+    class _PatchEmbedBlock(nn.Module):
+        """
+        block0: ảnh (B,3,32,32) → token sequence (B, 1+64, 512)
+        Tự chứa conv_proj + class_token + pos_embedding.
+        """
+        def __init__(self, conv_proj, class_token, pos_embedding):
+            super().__init__()
+            self.conv_proj     = conv_proj
+            self.class_token   = class_token   # nn.Parameter — register thủ công
+            self.pos_embedding = pos_embedding  # nn.Parameter
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            B = x.shape[0]
+            x = self.conv_proj(x)                        # (B, 512, 8, 8)
+            x = x.flatten(2).transpose(1, 2)             # (B, 64, 512)
+            cls = self.class_token.expand(B, -1, -1)     # (B, 1, 512)
+            x = torch.cat([cls, x], dim=1)               # (B, 65, 512)
+            x = x + self.pos_embedding                   # (B, 65, 512)
+            return x
+
+    class _EncoderLayersBlock(nn.Module):
+        """
+        block1-3: (B, 65, 512) → (B, 65, 512)
+        Gom một hoặc nhiều encoder TransformerEncoderLayer.
+        """
+        def __init__(self, layers: list):
+            super().__init__()
+            self.layers = nn.Sequential(*layers)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.layers(x)
+
+    class _FinalEncoderBlock(nn.Module):
+        """
+        block4: (B, 65, 512) → (B, 512)  ← CLS token sau LayerNorm
+        flatten(x, 1) trên (B, 512) = chính nó → compute_feature hoạt động đúng.
+        """
+        def __init__(self, layers: list, ln: nn.Module):
+            super().__init__()
+            self.layers = nn.Sequential(*layers)
+            self.ln     = ln
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = self.layers(x)   # (B, 65, 512)
+            x = self.ln(x)       # (B, 65, 512)
+            return x[:, 0]       # (B, 512) — CLS token
+
+    # ── Constructor ───────────────────────────────────────────────────────
+
+    def __init__(self, num_classes: int) -> None:
+        super().__init__()
+
+        vit = VisionTransformer(
+            image_size=32,
+            patch_size=4,
+            num_layers=6,
+            num_heads=8,
+            hidden_dim=512,
+            mlp_dim=2048,
+            num_classes=num_classes,
+        )
+
+        enc_layers = list(vit.encoder.layers.children())  # 6 TransformerEncoderLayer
+
+        # block0: patch embed
+        self.conv1 = self._PatchEmbedBlock(
+            conv_proj     = vit.conv_proj,
+            class_token   = vit.class_token,
+            pos_embedding = vit.encoder.pos_embedding,
+        )
+
+        # block1-3: mỗi block 1-2 encoder layers
+        # Phân chia: [0], [1], [2,3], [4,5]
+        # → 4 nhóm tương ứng layer1..layer4
+        self.layer1 = self._EncoderLayersBlock([enc_layers[0]])
+        self.layer2 = self._EncoderLayersBlock([enc_layers[1]])
+        self.layer3 = self._EncoderLayersBlock([enc_layers[2], enc_layers[3]])
+
+        # block4: 2 layer cuối + ln + lấy CLS → (B, 512)
+        self.layer4 = self._FinalEncoderBlock(
+            layers = [enc_layers[4], enc_layers[5]],
+            ln     = vit.encoder.ln,
+        )
+
+        # Alias để get_resnet18_blocks() không bị KeyError
+        self.bn1     = nn.Identity()
+        self.relu    = nn.Identity()
+        self.maxpool = nn.Identity()
+
+        # Head
+        self.head = vit.heads.head  # nn.Linear(512, num_classes)
+
+    # ── Forward ───────────────────────────────────────────────────────────
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)    # (B, 65, 512)
+        x = self.layer1(x)   # (B, 65, 512)
+        x = self.layer2(x)   # (B, 65, 512)
+        x = self.layer3(x)   # (B, 65, 512)
+        x = self.layer4(x)   # (B, 512)
+        return self.head(x)
+
+
+@register_backbone("cifar_vit")
+def make_cifar_vit(num_classes: int, args=None) -> nn.Module:
+    return CIFARViT(num_classes=num_classes)

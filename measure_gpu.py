@@ -515,6 +515,47 @@ def compute_eps(_feature_t: np.ndarray, _feature_tprime: np.ndarray):
     diff = torch.from_numpy(ft - ftp_transformed).to(DEVICE)
     return torch.linalg.norm(diff, ord=2, dim=-1).max().item()
 
+# from sklearn.linear_model import Ridge
+
+# def compute_eps(_feature_t, _feature_tprime, alpha=1.0):
+#     n = min(_feature_t.shape[0], _feature_tprime.shape[0])
+#     ft, ftp = _feature_t[:n], _feature_tprime[:n]
+#     reg = Ridge(alpha=alpha, fit_intercept=False).fit(ftp, ft)
+#     ftp_transformed = reg.predict(ftp)
+#     diff = torch.from_numpy(ft - ftp_transformed).to(DEVICE)
+#     return torch.linalg.norm(diff, ord=2, dim=-1).max().item()
+
+# from sklearn.decomposition import PCA
+# import numpy as np, torch
+
+# def compute_eps(_feature_t, _feature_tprime, n_components=None):
+#     n = min(_feature_t.shape[0], _feature_tprime.shape[0])
+#     ft, ftp = _feature_t[:n], _feature_tprime[:n]
+    
+#     # Tự động chọn k: tối đa rank khả thi
+#     k = min(n - 1, ft.shape[1], n_components or 64)
+    
+#     pca = PCA(n_components=k)
+#     pca.fit(ft)  # Fit subspace từ ft (task t)
+    
+#     ft_proj  = pca.transform(ft)   # Project ft vào subspace
+#     ftp_proj = pca.transform(ftp)  # Project ftp vào CÙNG subspace
+    
+#     diff = torch.from_numpy(ft_proj - ftp_proj).to(DEVICE)
+#     return torch.linalg.norm(diff, ord=2, dim=-1).max().item()
+
+
+# def compute_eps(_feature_t, _feature_tprime, rcond=1e-3):
+#     n = min(_feature_t.shape[0], _feature_tprime.shape[0])
+#     ft, ftp = _feature_t[:n], _feature_tprime[:n]
+    
+#     # lstsq với rcond cắt các singular values nhỏ
+#     # → tránh overfit mà không bias như Ridge
+#     W, _, _, _ = np.linalg.lstsq(ftp, ft, rcond=rcond)
+#     ftp_transformed = ftp @ W
+    
+#     diff = torch.from_numpy(ft - ftp_transformed).to(DEVICE)
+#     return torch.linalg.norm(diff, ord=2, dim=-1).max().item()
 def compute_cka(feat_a: np.ndarray, feat_b: np.ndarray):
     """CKA tính hoàn toàn trên GPU."""
     cka_obj = TorchCKA(device=DEVICE)
@@ -536,12 +577,12 @@ def to_float(x):
 # ─────────────────────────────────────────────────────────────────────────────
 def measure_all_representation_drift(args, dataset_bundle, partition):
     if args.kaggle == False:
-        root = 'C:/Thu/FCL/outputs'
+        root = '/mnt/Data/fcl-standard-master/'
     else :
         root = 'kaggle/working'
-    
+
     output_file = (
-        f'{root}/representation_drift_temporal_2tasks'
+        f'{root}/representation_drift_temporal_tasks_alpha_alpha99'
         f'-{args.partition_options}-{args.backbone}.csv'
     )
 
@@ -563,7 +604,7 @@ def measure_all_representation_drift(args, dataset_bundle, partition):
     # key = (t, tprime, block_idx) → value = old_test_acc của round trước
     acc_history_old: dict = {}
 
-    for client_id in range(args.num_clients):
+    for client_id in [0,1,2,3,4]:
         logger.info('=' * 60)
         logger.info(
             f'  CLIENT {client_id:>2} / {args.num_clients - 1}'
@@ -580,9 +621,18 @@ def measure_all_representation_drift(args, dataset_bundle, partition):
 
                 ckpt_t  = get_model_path(args.saving_dir, client_id, t,      round_idx)
                 ckpt_tp = get_model_path(args.saving_dir, client_id, tprime, round_idx)
-                ckpt_eps_t = get_model_path(args.saving_dir, client_id, t, 24)
+                ckpt_eps_t = get_model_path(args.saving_dir, client_id, t, round_idx)
 
-
+                # ── CHECK: skip nếu thiếu bất kỳ checkpoint nào (client ít sample → không được train)
+                missing_ckpts = [c for c in [ckpt_t, ckpt_tp, ckpt_eps_t] if not os.path.isfile(c)]
+                if missing_ckpts:
+                    for m in missing_ckpts:
+                        logger.warning(f'  │  [SKIP] Missing checkpoint (client có thể ít sample): {m}')
+                    logger.warning(
+                        f'  │  [SKIP] Bỏ qua pair (t={t}, tprime={tprime}) '
+                        f'round={round_idx} — thiếu {len(missing_ckpts)} checkpoint(s)'
+                    )
+                    continue
                 model_t      = load_resnet18_from_checkpoint(ckpt_t,  load_head=False)
                 model_eps_t = load_resnet18_from_checkpoint(ckpt_eps_t, load_head=False)
                 model_tprime = load_resnet18_from_checkpoint(ckpt_tp, load_head=False)
@@ -756,7 +806,7 @@ def measure_all_representation_drift(args, dataset_bundle, partition):
                             line = (
                                 f'{client_id},{block_idx},{t},{tprime},'                                
                                 f'{sigma_old},{eps_old},'
-                                #f'{float(cka_old)},{align_score[10]}\n'
+                                f'{float(cka_old)},{align_score[10]}\n'
                             )
 
                             if 'nan' in line.lower():
@@ -793,28 +843,62 @@ def measure_all_representation_drift(args, dataset_bundle, partition):
 
     logger.info(f'\n  Hoàn thành! CSV → {output_file}')
 
-def get_shared_probe_dataset(
-    datadir='./dataset/cifar10-classes/',
-    classes=list(range(10)),
-    images_per_class=75,
-    train_images_per_class=5000,
+def get_shared_probe_dataset_from_bundle(
+    dataset_bundle,
+    args,
+    samples_per_class: int = 75,
+    alpha: float = None,
+    seed: int = None,
 ):
-    x_list, y_list = [], []
-    for cls in classes:
-        data_file = datadir + str(cls) + '.npy'
-        data = np.load(data_file)
-        # Lấy từ phần test (sau train split)
-        test_data = data[train_images_per_class : train_images_per_class + images_per_class]
-        x_list.append(test_data)
-        y_list.append(np.full(images_per_class, cls, dtype=np.int64))
+    """
+    Tạo global probe dataset (đủ num_classes class) lấy từ test_dataset của dataset_bundle.
+    Nếu alpha được truyền, sample non-iid theo Dirichlet (giống client partition);
+    nếu alpha=None, lấy đều mỗi class `samples_per_class` mẫu (iid).
 
-    x = torch.tensor(np.concatenate(x_list), dtype=torch.float32)
-    y = torch.tensor(np.concatenate(y_list), dtype=torch.long)
-    return Transform_dataset(x, y)
+    Trả về torch.utils.data.Subset (tương thích _make_loader).
+    """
+    from torch.utils.data import Subset
 
-def measure_all_drift_follow_task_client_pair(args):
-    output_file = f'/home/ghostm211/Thu/FCL_3/outputs/client_representation_drift_{args.num_tasks}_{args.num_clients}Client_-{args.partition_options}-{args.backbone}.csv'
+    test_targets = dataset_bundle.test_targets  # np.ndarray
+    num_classes  = dataset_bundle.num_classes
+    rng = np.random.RandomState(seed if seed is not None else args.seed)
 
+    selected_indices = []
+
+    if alpha is None:
+        # IID: lấy đều mỗi class
+        for cls in range(num_classes):
+            cls_idx = np.where(test_targets == cls)[0]
+            rng.shuffle(cls_idx)
+            take = min(samples_per_class, len(cls_idx))
+            selected_indices.extend(cls_idx[:take].tolist())
+    else:
+        # Non-IID: dùng Dirichlet để quyết định số lượng mẫu lấy từ mỗi class
+        total_target = samples_per_class * num_classes
+        weights = rng.dirichlet(alpha * np.ones(num_classes))
+        counts  = np.floor(weights * total_target).astype(int)
+        remainder = total_target - counts.sum()
+        if remainder > 0:
+            frac = weights * total_target - counts
+            top  = np.argsort(-frac)[:remainder]
+            counts[top] += 1
+
+        for cls in range(num_classes):
+            cls_idx = np.where(test_targets == cls)[0]
+            rng.shuffle(cls_idx)
+            take = min(counts[cls], len(cls_idx))
+            selected_indices.extend(cls_idx[:take].tolist())
+
+    rng.shuffle(selected_indices)
+    return Subset(dataset_bundle.test_dataset, selected_indices)
+
+def measure_all_drift_follow_task_client_pair(args, dataset_bundle, partition):
+
+
+    output_dir = '/mnt/Data/fcl-standard-master/outputs'
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_file = f'{output_dir}/client_representation_drift_{args.num_tasks}_{args.num_clients}Client_-{args.partition_options}-{args.backbone}-03.csv'
     if not os.path.isfile(output_file):
         with open(output_file, 'w') as f:
             f.write('block_idx,client1,client2,t,'
@@ -870,7 +954,13 @@ def measure_all_drift_follow_task_client_pair(args):
             logger.info(f'  │  model_c  ← {ckpt_client}')
             logger.info(f'  │  model_c\' ← {ckpt_client_prime}')
 
-            shared_probe  = get_shared_probe_dataset()
+            shared_probe = get_shared_probe_dataset_from_bundle(
+                dataset_bundle=dataset_bundle,
+                args=args,
+                samples_per_class=75,
+                alpha=None,  # None -> iid, hoặc lấy từ train_args
+                seed=args.seed,
+            )
             model_head_c  = load_model_with_head(ckpt_client,       num_classes=args.classes)
             model_head_cp = load_model_with_head(ckpt_client_prime, num_classes=args.classes)
             loader_c      = _make_loader(shared_probe)
@@ -1765,6 +1855,40 @@ def main(args):
     torch.manual_seed(args.seed)
     train_args = load_train_args(args.args_json)
     train_args.data_root = args.data_root
+    # ── Tự suy ra saving_dir từ args_json, không phụ thuộc input tay ──
+    run_dir = os.path.dirname(os.path.abspath(args.args_json))
+
+    # Lấy mức hetero từ train_args (alpha của Dirichlet allocation)
+    # alpha thường lưu trong args.json dưới tên 'alpha' hoặc 'dirichlet_alpha'
+    alpha_val = getattr(train_args, 'alpha', None) or getattr(train_args, 'dirichlet_alpha', None)
+
+    ckpt_dirname = f'checkpoints_client_hete_{alpha_val}' if alpha_val is not None else None
+
+    candidates = []
+    if ckpt_dirname:
+        candidates.append(os.path.join(run_dir, ckpt_dirname))
+
+    # fallback: tự tìm thư mục con bắt đầu bằng "checkpoints_client_hete_"
+    if os.path.isdir(run_dir):
+        for name in os.listdir(run_dir):
+            full = os.path.join(run_dir, name)
+            if os.path.isdir(full) and name.startswith('checkpoints_client'):
+                candidates.append(full)
+
+    resolved_saving_dir = None
+    for c in candidates:
+        if os.path.isdir(c):
+            resolved_saving_dir = c
+            break
+
+    if resolved_saving_dir is None:
+        raise FileNotFoundError(
+            f'Không tìm thấy thư mục checkpoint trong {run_dir}. '
+            f'Đã thử: {candidates}'
+        )
+
+    args.saving_dir = resolved_saving_dir
+    logger.info(f'  [AUTO] saving_dir resolved → {args.saving_dir}')
         # ── Build dataset FIRST so num_classes is available ──
     from datasets import build_dataset, build_partition
     dataset_bundle = build_dataset(train_args.dataset, train_args)
@@ -1803,7 +1927,7 @@ def main(args):
         if args.method == 'dynamic':
             measure_follow_training(args)
         elif args.method == 'cross_client':
-            measure_all_drift_follow_task_client_pair(args)
+            measure_all_drift_follow_task_client_pair(args, dataset_bundle, partition)
         elif args.method == 'cross_task':
             measure_all_representation_drift(args, dataset_bundle, partition)
         elif args.method == 'retrain_backbone_cross_task':

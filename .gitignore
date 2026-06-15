@@ -5,4 +5,9 @@ outputs/
 __pycache__/
 *.pyc
 round_checkpoints/
+
 res_T/
+
+res/
+checkpoints/
+

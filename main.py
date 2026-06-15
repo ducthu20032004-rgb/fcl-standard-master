@@ -47,7 +47,7 @@ DATASET_DEFAULTS = {
         "use_cifar100_tensor_cache": False,
     },
     "cifar10": {
-        "batch_size": 64,
+        "batch_size": 128,
         "eval_batch_size": 256,
         "task_label_order": "sequential",
         "dirichlet_allocation": "multinomial",
@@ -179,7 +179,7 @@ def parse_args():
 
     parser.add_argument("--rounds-per-task", type=int, default=25)
     parser.add_argument("--client-fraction", type=float, default=1.0)
-    parser.add_argument("--local-epochs", type=int, default=1)
+    parser.add_argument("--local-epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--eval-batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -342,8 +342,8 @@ def apply_dataset_defaults(args):
     # Helpful scenario defaults
     if args.scenario == "task-il" and args.loss_mode == "full":
         # task-il usually works best / most cleanly with partial training loss
-        args.loss_mode = "partial"
-
+        #args.loss_mode = "partial"
+        args.loss_mode = "full"
     if args.dataset == "pacs" and args.scenario == "class-il":
         # PACS is intended here for domain-il benchmarking
         args.scenario = "domain-il"
@@ -436,7 +436,7 @@ def save_checkpoint(state_dict, checkpoint_dir: Path, tag: str, client_id: int, 
     try:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         path = checkpoint_dir / f"client_{client_id}_task_{task_id}_round_{round_in_task}_{tag}.pt"
-        torch.save(state_dict, path)
+        #torch.save(state_dict, path)
         logger.info("[CHECKPOINT][%s] client=%s | task=%s | round=%s", tag, client_id, task_id, round_in_task)
     except Exception as e:
         logger.error("[CHECKPOINT ERROR][%s] client=%s: %s", tag, client_id, str(e))
@@ -536,7 +536,7 @@ def main():
     task_acc_history = []
     total_rounds = partition.stream_length * args.rounds_per_task
     global_rng = np.random.RandomState(args.seed)
-    cp_round_dir = Path(args.checkpoint_dir_round) / "round_checkpoints"
+    cp_round_dir = Path(args.checkpoint_dir_round) / f"round_checkpoints_{args.dirichlet_alpha}"
     for task_pos in range(partition.stream_length):
         current_task_for_client = [
             partition.client_stream_orders[client_id][task_pos] for client_id in range(args.num_clients)
@@ -627,10 +627,11 @@ def main():
                 )
 
                 
-                # Save client weights
-                if int(client_id) in [0,1,2,3,4] and round_in_task == args.rounds_per_task - 1:
+                # Save client weights at the end of each task for offline drift analysis.
+                if round_in_task == 24:
                     try:
-                        checkpoint_dir = Path(run_dirs["run_dir"]) / f"checkpoints_client_hete_{args.dirichlet_alpha}"
+                        checkpoint_dir = Path(run_dirs["run_dir"]) / f"checkpoints_client_{args.backbone}_hete_{args.dirichlet_alpha}"
+                        
                         checkpoint_dir.mkdir(parents=True, exist_ok=True)
                         
                         state_to_save = (
@@ -663,7 +664,7 @@ def main():
             for client_id, snap in _drift_snapshots.items():
                 task_id = snap["task_id"]
 
-                # ③ Lưu checkpoint after_aggr
+                #③ Lưu checkpoint after_aggr
                 save_checkpoint(
                     state_dict=aggr_state,
                     checkpoint_dir=cp_round_dir,
@@ -674,8 +675,10 @@ def main():
                     logger=logger,
                 )
 
-                # Test data của client tại đúng task_id đó
-                test_indices = partition.client_test_task_indices[client_id][task_id]
+                # Dùng test set của toàn task để số mẫu đủ lớn cho đo drift block-wise.
+                # Nếu dùng test split riêng theo client, alpha lớn sẽ khiến N nhỏ và
+                # phép fit tuyến tính của eps dễ suy biến thành residual ~0 giả tạo.
+                test_indices = partition.test_task_indices[task_id]
                 if len(test_indices) == 0:
                     logger.warning(
                         "[DRIFT] client=%s task=%s: no test data, skip.", client_id, task_id
@@ -700,32 +703,33 @@ def main():
                     logger.error("[DRIFT] load model error client=%s: %s", client_id, e)
                     continue
 
+                num_blocks = len(get_resnet18_blocks(m_before))
                 for block_idx in [4]:
                     target_layer = f"block{block_idx}"
                     try:
-                        feat_before = compute_feature_resnet18(
-                            m_before,      client_id, test_subset, target_layer, args.seed, args
-                        )
-                        feat_local  = compute_feature_resnet18(
-                            m_after_local, client_id, test_subset, target_layer, args.seed, args
-                        )
-                        feat_aggr   = compute_feature_resnet18(
-                            m_after_aggr,  client_id, test_subset, target_layer, args.seed, args
-                        )
+                        # feat_before = compute_feature_resnet18(
+                        #     m_before,      client_id, test_subset, target_layer, args.seed, args
+                        # )
+                        # feat_local  = compute_feature_resnet18(
+                        #     m_after_local, client_id, test_subset, target_layer, args.seed, args
+                        # )
+                        # feat_aggr   = compute_feature_resnet18(
+                        #     m_after_aggr,  client_id, test_subset, target_layer, args.seed, args
+                        # )
 
-                        eps_trained = compute_eps(feat_before, feat_local)
-                        eps_aggr    = compute_eps(feat_local,  feat_aggr)
-                        eps_global  = compute_eps(feat_before, feat_aggr)
+                        # eps_trained = compute_eps(feat_before, feat_local)
+                        # eps_aggr    = compute_eps(feat_local,  feat_aggr)
+                        # eps_global  = compute_eps(feat_before, feat_aggr)
 
-                        cknna_trained, _ = compute_alignment_from_arrays(
-                            feat_before, feat_local, "mutual_knn", topk=10, precise=True
-                        )
-                        cknna_aggr, _    = compute_alignment_from_arrays(
-                            feat_local,  feat_aggr,  "mutual_knn", topk=10, precise=True
-                        )
-                        cknna_global, _  = compute_alignment_from_arrays(
-                            feat_before, feat_aggr,  "mutual_knn", topk=10, precise=True
-                        )
+                        # cknna_trained, _ = compute_alignment_from_arrays(
+                        #     feat_before, feat_local, "mutual_knn", topk=10, precise=True
+                        # )
+                        # cknna_aggr, _    = compute_alignment_from_arrays(
+                        #     feat_local,  feat_aggr,  "mutual_knn", topk=10, precise=True
+                        # )
+                        # cknna_global, _  = compute_alignment_from_arrays(
+                        #     feat_before, feat_aggr,  "mutual_knn", topk=10, precise=True
+                        # )
 
                         logger.info(
                             "[DRIFT] round=%s task_pos=%s client=%s %s | "
