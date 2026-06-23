@@ -536,7 +536,7 @@ def main():
     task_acc_history = []
     total_rounds = partition.stream_length * args.rounds_per_task
     global_rng = np.random.RandomState(args.seed)
-    cp_round_dir = Path(args.checkpoint_dir_round) / f"round_checkpoints_{args.dirichlet_alpha}"
+    cp_round_dir = Path(args.checkpoint_dir_round) / f"round_checkpoints_{args.dirichlet_alpha}__{args.backbone}"
     for task_pos in range(partition.stream_length):
         current_task_for_client = [
             partition.client_stream_orders[client_id][task_pos] for client_id in range(args.num_clients)
@@ -575,15 +575,15 @@ def main():
                 task_id = current_task_for_client[int(client_id)]
                 train_indices = partition.client_task_indices[int(client_id)][task_id]
                 # ① Lưu checkpoint before_train
-                save_checkpoint(
-                    state_dict=global_state_before,
-                    checkpoint_dir=cp_round_dir,
-                    tag="before_train",
-                    client_id=int(client_id),
-                    task_id=task_id,
-                    round_in_task=round_in_task,
-                    logger=logger,
-                )
+                # save_checkpoint(
+                #     state_dict=global_state_before,
+                #     checkpoint_dir=cp_round_dir,
+                #     tag="before_train",
+                #     client_id=int(client_id),
+                #     task_id=task_id,
+                #     round_in_task=round_in_task,
+                #     logger=logger,
+                # )
 
                 update = client.fit(
                     global_payload=broadcast_payload,
@@ -605,16 +605,16 @@ def main():
                     else update.state_dict
                 )
 
-                # ② Lưu checkpoint after_train
-                save_checkpoint(
-                    state_dict=state_dict_to_cpu(local_state),
-                    checkpoint_dir=cp_round_dir,
-                    tag="after_train",
-                    client_id=int(client_id),
-                    task_id=task_id,
-                    round_in_task=round_in_task,
-                    logger=logger,
-                )
+                # # ② Lưu checkpoint after_train
+                # save_checkpoint(
+                #     state_dict=state_dict_to_cpu(local_state),
+                #     checkpoint_dir=cp_round_dir,
+                #     tag="after_train",
+                #     client_id=int(client_id),
+                #     task_id=task_id,
+                #     round_in_task=round_in_task,
+                #     logger=logger,
+                # )
                     # Ghi nhớ để tính drift sau aggregate
                 _drift_snapshots[int(client_id)] = {
                     "before":      global_state_before,
@@ -650,123 +650,123 @@ def main():
             
 
             server.aggregate(local_updates=local_updates, global_model=global_model)
-            # ── ③ Snapshot AFTER aggregate + tính drift ──
-            aggr_state = state_dict_to_cpu(global_model.state_dict())
+            # # ── ③ Snapshot AFTER aggregate + tính drift ──
+            # aggr_state = state_dict_to_cpu(global_model.state_dict())
 
-            _drift_csv_path = cp_round_dir / f"drift_results_{args.dirichlet_alpha}.csv"
-            _drift_fieldnames = [
-                "global_round", "task_pos", "round_in_task",
-                "client_id", "task_id", "block",
-                "eps_trained", "eps_aggr", "eps_global",
-                "cknna_trained", "cknna_aggr", "cknna_global",
-            ]
+            # _drift_csv_path = cp_round_dir / f"drift_results_{args.dirichlet_alpha}.csv"
+            # _drift_fieldnames = [
+            #     "global_round", "task_pos", "round_in_task",
+            #     "client_id", "task_id", "block",
+            #     "eps_trained", "eps_aggr", "eps_global",
+            #     "cknna_trained", "cknna_aggr", "cknna_global",
+            # ]
 
-            for client_id, snap in _drift_snapshots.items():
-                task_id = snap["task_id"]
+            # for client_id, snap in _drift_snapshots.items():
+            #     task_id = snap["task_id"]
 
-                #③ Lưu checkpoint after_aggr
-                save_checkpoint(
-                    state_dict=aggr_state,
-                    checkpoint_dir=cp_round_dir,
-                    tag="after_aggr",
-                    client_id=client_id,
-                    task_id=task_id,
-                    round_in_task=round_in_task,
-                    logger=logger,
-                )
+            #     #③ Lưu checkpoint after_aggr
+            #     save_checkpoint(
+            #         state_dict=aggr_state,
+            #         checkpoint_dir=cp_round_dir,
+            #         tag="after_aggr",
+            #         client_id=client_id,
+            #         task_id=task_id,
+            #         round_in_task=round_in_task,
+            #         logger=logger,
+            #     )
 
-                # Dùng test set của toàn task để số mẫu đủ lớn cho đo drift block-wise.
-                # Nếu dùng test split riêng theo client, alpha lớn sẽ khiến N nhỏ và
-                # phép fit tuyến tính của eps dễ suy biến thành residual ~0 giả tạo.
-                test_indices = partition.test_task_indices[task_id]
-                if len(test_indices) == 0:
-                    logger.warning(
-                        "[DRIFT] client=%s task=%s: no test data, skip.", client_id, task_id
-                    )
-                    continue
+            #     # Dùng test set của toàn task để số mẫu đủ lớn cho đo drift block-wise.
+            #     # Nếu dùng test split riêng theo client, alpha lớn sẽ khiến N nhỏ và
+            #     # phép fit tuyến tính của eps dễ suy biến thành residual ~0 giả tạo.
+            #     test_indices = partition.test_task_indices[task_id]
+            #     if len(test_indices) == 0:
+            #         logger.warning(
+            #             "[DRIFT] client=%s task=%s: no test data, skip.", client_id, task_id
+            #         )
+            #         continue
 
-                test_subset = torch.utils.data.Subset(
-                    dataset_bundle.test_dataset, test_indices
-                )
+            #     test_subset = torch.utils.data.Subset(
+            #         dataset_bundle.test_dataset, test_indices
+            #     )
 
-                def _load_model(sd):
-                    m = model_builder().to(device)
-                    m.load_state_dict({k: v.to(device) for k, v in sd.items()})
-                    m.eval()
-                    return m
+            #     def _load_model(sd):
+            #         m = model_builder().to(device)
+            #         m.load_state_dict({k: v.to(device) for k, v in sd.items()})
+            #         m.eval()
+            #         return m
 
-                try:
-                    m_before      = _load_model(snap["before"])
-                    m_after_local = _load_model(snap["after_local"])
-                    m_after_aggr  = _load_model(aggr_state)
-                except Exception as e:
-                    logger.error("[DRIFT] load model error client=%s: %s", client_id, e)
-                    continue
+            #     try:
+            #         m_before      = _load_model(snap["before"])
+            #         m_after_local = _load_model(snap["after_local"])
+            #         m_after_aggr  = _load_model(aggr_state)
+            #     except Exception as e:
+            #         logger.error("[DRIFT] load model error client=%s: %s", client_id, e)
+            #         continue
 
-                num_blocks = len(get_resnet18_blocks(m_before))
-                for block_idx in [4]:
-                    target_layer = f"block{block_idx}"
-                    try:
-                        # feat_before = compute_feature_resnet18(
-                        #     m_before,      client_id, test_subset, target_layer, args.seed, args
-                        # )
-                        # feat_local  = compute_feature_resnet18(
-                        #     m_after_local, client_id, test_subset, target_layer, args.seed, args
-                        # )
-                        # feat_aggr   = compute_feature_resnet18(
-                        #     m_after_aggr,  client_id, test_subset, target_layer, args.seed, args
-                        # )
+            #     num_blocks = len(get_resnet18_blocks(m_before))
+            #     for block_idx in [4]:
+            #         target_layer = f"block{block_idx}"
+            #         try:
+            #             # feat_before = compute_feature_resnet18(
+            #             #     m_before,      client_id, test_subset, target_layer, args.seed, args
+            #             # )
+            #             # feat_local  = compute_feature_resnet18(
+            #             #     m_after_local, client_id, test_subset, target_layer, args.seed, args
+            #             # )
+            #             # feat_aggr   = compute_feature_resnet18(
+            #             #     m_after_aggr,  client_id, test_subset, target_layer, args.seed, args
+            #             # )
 
-                        # eps_trained = compute_eps(feat_before, feat_local)
-                        # eps_aggr    = compute_eps(feat_local,  feat_aggr)
-                        # eps_global  = compute_eps(feat_before, feat_aggr)
+            #             # eps_trained = compute_eps(feat_before, feat_local)
+            #             # eps_aggr    = compute_eps(feat_local,  feat_aggr)
+            #             # eps_global  = compute_eps(feat_before, feat_aggr)
 
-                        # cknna_trained, _ = compute_alignment_from_arrays(
-                        #     feat_before, feat_local, "mutual_knn", topk=10, precise=True
-                        # )
-                        # cknna_aggr, _    = compute_alignment_from_arrays(
-                        #     feat_local,  feat_aggr,  "mutual_knn", topk=10, precise=True
-                        # )
-                        # cknna_global, _  = compute_alignment_from_arrays(
-                        #     feat_before, feat_aggr,  "mutual_knn", topk=10, precise=True
-                        # )
+            #             # cknna_trained, _ = compute_alignment_from_arrays(
+            #             #     feat_before, feat_local, "mutual_knn", topk=10, precise=True
+            #             # )
+            #             # cknna_aggr, _    = compute_alignment_from_arrays(
+            #             #     feat_local,  feat_aggr,  "mutual_knn", topk=10, precise=True
+            #             # )
+            #             # cknna_global, _  = compute_alignment_from_arrays(
+            #             #     feat_before, feat_aggr,  "mutual_knn", topk=10, precise=True
+            #             # )
 
-                        logger.info(
-                            "[DRIFT] round=%s task_pos=%s client=%s %s | "
-                            "eps: trained=%.4f aggr=%.4f global=%.4f | "
-                            "cknna: trained=%.4f aggr=%.4f global=%.4f",
-                            global_round, task_pos, client_id, target_layer,
-                            eps_trained, eps_aggr, eps_global,
-                            cknna_trained, cknna_aggr, cknna_global,
-                        )
+            #             logger.info(
+            #                 "[DRIFT] round=%s task_pos=%s client=%s %s | "
+            #                 "eps: trained=%.4f aggr=%.4f global=%.4f | "
+            #                 "cknna: trained=%.4f aggr=%.4f global=%.4f",
+            #                 global_round, task_pos, client_id, target_layer,
+            #                 eps_trained, eps_aggr, eps_global,
+            #                 cknna_trained, cknna_aggr, cknna_global,
+            #             )
 
-                        write_header = not _drift_csv_path.exists()
-                        with open(_drift_csv_path, "a", newline="") as f:
-                            writer = csv.DictWriter(f, fieldnames=_drift_fieldnames)
-                            if write_header:
-                                writer.writeheader()
-                            writer.writerow({
-                                "global_round":  global_round,
-                                "task_pos":      task_pos,
-                                "round_in_task": round_in_task,
-                                "client_id":     client_id,
-                                "task_id":       task_id,
-                                "block":         block_idx,
-                                "eps_trained":   round(float(eps_trained),  6),
-                                "eps_aggr":      round(float(eps_aggr),     6),
-                                "eps_global":    round(float(eps_global),   6),
-                                "cknna_trained": round(float(cknna_trained),6),
-                                "cknna_aggr":    round(float(cknna_aggr),   6),
-                                "cknna_global":  round(float(cknna_global), 6),
-                            })
+            #             write_header = not _drift_csv_path.exists()
+            #             with open(_drift_csv_path, "a", newline="") as f:
+            #                 writer = csv.DictWriter(f, fieldnames=_drift_fieldnames)
+            #                 if write_header:
+            #                     writer.writeheader()
+            #                 writer.writerow({
+            #                     "global_round":  global_round,
+            #                     "task_pos":      task_pos,
+            #                     "round_in_task": round_in_task,
+            #                     "client_id":     client_id,
+            #                     "task_id":       task_id,
+            #                     "block":         block_idx,
+            #                     "eps_trained":   round(float(eps_trained),  6),
+            #                     "eps_aggr":      round(float(eps_aggr),     6),
+            #                     "eps_global":    round(float(eps_global),   6),
+            #                     "cknna_trained": round(float(cknna_trained),6),
+            #                     "cknna_aggr":    round(float(cknna_aggr),   6),
+            #                     "cknna_global":  round(float(cknna_global), 6),
+            #                 })
 
-                    except Exception as e:
-                        logger.error(
-                            "[DRIFT] client=%s block%s error: %s", client_id, block_idx, e
-                        )
+            #         except Exception as e:
+            #             logger.error(
+            #                 "[DRIFT] client=%s block%s error: %s", client_id, block_idx, e
+            #             )
 
-                del m_before, m_after_local, m_after_aggr
-                torch.cuda.empty_cache()
+                # del m_before, m_after_local, m_after_aggr
+                # torch.cuda.empty_cache()
             task_accs, task_correct, task_total = eval_taskwise_accuracy(
                 model=global_model,
                 dataset_bundle=dataset_bundle,
